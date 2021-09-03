@@ -1,9 +1,8 @@
 #[macro_use] extern crate rocket;
 
-use std::error::Error;
 use std::fs::File;
-use std::io;
 use std::io::{BufReader, Write};
+use rocket::fs::NamedFile;
 use serde::Deserialize;
 use zip::ZipWriter;
 use zip::write::FileOptions;
@@ -17,9 +16,9 @@ struct UrlFile {
     filename: String,
 }
 
-fn parse_manifest() -> Result<Vec<UrlFile>, Box<dyn Error>> {
+fn parse_manifest() -> std::io::Result<Vec<UrlFile>> {
     // Presumably this is a static file that's updated regularly by another process
-    let file = File::open("../sample_archive.json")?;
+    let file = File::open("./tiny_sample_archive.json")?;
 
     // Create a buffered reader on it because we can't be sure how big it may grow to be
     let reader = BufReader::new(file);
@@ -30,7 +29,7 @@ fn parse_manifest() -> Result<Vec<UrlFile>, Box<dyn Error>> {
     Ok(manifest)
 }
 
-async fn fetch_img_file(zip: &mut ZipWriter<File>, options: FileOptions, url: &str, filename: &str) -> ZipResult<()> {
+async fn fetch_and_compress(zip: &mut ZipWriter<File>, options: FileOptions, url: &str, filename: &str) -> ZipResult<()> {
     // Prepare to compress this file, using its original base name
     zip.start_file(filename, options)?;
 
@@ -46,26 +45,31 @@ async fn fetch_img_file(zip: &mut ZipWriter<File>, options: FileOptions, url: &s
 //===================================== the endpoint in question ===================================/
 
 #[get("/stream/images")]
-async fn stream_img_files() -> io::Result<String> {
+async fn stream_img_files() -> Option<NamedFile> {
+    let archive_path = "urls_to_zip_v2_image_archive.zip";
 
     // Load the JSON file 
     let manifest = parse_manifest().expect("problem parsing manifest");
 
     // Create a local target zip archive, and a ZipWriter to do the heavy lifting
+    let options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    
+    // Writes to server local disk in traditional manner
     let archive = File::create("urls_to_zip_v2_image_archive.zip").expect("couldn't create archive file");
     let mut zip = ZipWriter::new(archive);
-    let options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
-
+        
     // Iterate over each url:basefilename pair, downloading/compressing/appending on a file-wise basis
     for url_file in manifest.iter() {
-        fetch_img_file(&mut zip, options, &url_file.url, &url_file.filename).await.expect("failed to fetch image file");
-    };
+        fetch_and_compress(&mut zip, options, &url_file.url, &url_file.filename)
+            .await
+            .expect("failed to fetch image file");
+    }
 
     // Seal the deal
-    zip.finish()?;
+    zip.finish().expect("zip not finalized");
 
-    // Conversation piece, left for discussion - rocket crate route function requirement 
-    Ok("".to_string())
+    // Stream the fully completed, huge zip file finally
+    NamedFile::open(archive_path).await.ok()
 }
 
 //===================================== rocket boilerplate ===================================/
@@ -86,34 +90,10 @@ fn not_found(request: &Request<'_>) -> content::RawHtml<String> {
     content::RawHtml(html)
 }
 
-use rocket::response::stream::ByteStream;
-use rocket::futures::stream::repeat;
-use rocket::tokio::time::{self, Duration};
-
-#[get("/bytes")]
-fn bytes() -> ByteStream![&'static [u8]] {
-    ByteStream(repeat(&[1, 2, 3][..]))
-}
-
-#[get("/byte/stream")]
-fn stream() -> ByteStream![Vec<u8>] {
-    ByteStream! {
-        let mut interval = time::interval(Duration::from_secs(1));
-        for i in 0..10u8 {
-            yield vec![i, i + 1, i + 2];
-            interval.tick().await;
-        }
-    }
-}
-
-
 #[launch]
 fn rocket() -> _ {
-
     // As vanilla a rocket as was ever launched
     rocket::build()
         .mount("/", routes![stream_img_files])
-        .mount("/", routes![bytes, stream])
         .register("/", catchers![not_found])
-
 }
