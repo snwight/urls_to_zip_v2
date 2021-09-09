@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{BufReader, Write};
 use rocket::fs::NamedFile;
 use serde::Deserialize;
+use tempfile::NamedTempFile;
 use zip::ZipWriter;
 use zip::write::FileOptions;
 use zip::result::ZipResult;
@@ -46,16 +47,13 @@ async fn fetch_and_compress(zip: &mut ZipWriter<File>, options: FileOptions, url
 
 #[get("/stream/images")]
 async fn stream_img_files() -> Option<NamedFile> {
-    let archive_path = "urls_to_zip_v2_image_archive.zip";
-
     // Load the JSON file 
     let manifest = parse_manifest().expect("problem parsing manifest");
-
-    // Create a local target zip archive, and a ZipWriter to do the heavy lifting
+  
+    // Anonymous I/O-optimized tempfile is perfect as a dumping ground for zipped contents
+    let temp_archive = NamedTempFile::new().expect("problem creating NamedTempFile");
     let options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    
-    // Writes to server local disk in traditional manner
-    let archive = File::create("urls_to_zip_v2_image_archive.zip").expect("couldn't create archive file");
+    let archive = File::create(temp_archive.path()).expect("couldn't create archive file");
     let mut zip = ZipWriter::new(archive);
         
     // Iterate over each url:basefilename pair, downloading/compressing/appending on a file-wise basis
@@ -69,7 +67,7 @@ async fn stream_img_files() -> Option<NamedFile> {
     zip.finish().expect("zip not finalized");
 
     // Stream the fully completed, huge zip file finally
-    NamedFile::open(archive_path).await.ok()
+    NamedFile::open(temp_archive.path()).await.ok()
 }
 
 //===================================== rocket boilerplate ===================================/
