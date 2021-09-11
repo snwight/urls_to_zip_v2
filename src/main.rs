@@ -1,7 +1,7 @@
 #[macro_use] extern crate rocket;
 
 use std::fs::File;
-use std::io::{BufReader, Read, Write, Seek, SeekFrom};
+use std::io::{BufReader, Read, Write}; // Seek, SeekFrom};
 use rocket::response::stream::ByteStream;
 use rocket::response::stream::stream;
 use serde::Deserialize;
@@ -57,35 +57,27 @@ async fn stream_img_files() -> ByteStream![Vec<u8>] {
     let archive = NamedTempFile::new().expect("problem creating TempFile");
     let mut tmp_arc = File::open(archive.path()).expect("couldn't obtain archive file handle");
     let mut zip = ZipWriter::new(archive);
-    let options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    let mut tmp_arc_fpos = 0;
+    let options = FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
     ByteStream::from(stream! {
-
         // Iterate over each url:basefilename pair, downloading/compressing/appending on a file-wise basis
         for url_file in manifest.iter() {
             fetch_and_compress(&mut zip, options, &url_file.url, &url_file.filename)
                 .await
                 .expect("failed to fetch image file");
 
-            // Rewind arc file to last starting offset, read to current EOF
-            let new_arc_fpos = tmp_arc.seek(SeekFrom::End(0)).expect("tell failed");
-            tmp_arc.seek(SeekFrom::Start(tmp_arc_fpos)).expect("intermediate rewind failed");
-            tmp_arc_fpos = new_arc_fpos;
+            // Read arc file from previous offset to current EOF
             let mut buffer: Vec<u8> = Vec::new();
             let read_size = tmp_arc.read_to_end(&mut buffer).expect("intermediate read failed");
-
             print!("read_size: {}\n", read_size);
             yield buffer
         }
 
         zip.finish();
 
-        // Rewind one last time and flush to listener
-        tmp_arc.seek(SeekFrom::Start(tmp_arc_fpos)).expect("final rewind failed");
+        // Flush zip metadata to listener and close up shop
         let mut buffer: Vec<u8> = Vec::new();
         let read_size = tmp_arc.read_to_end(&mut buffer).expect("final read failed");
-
         print!("read_size: {}\n", read_size);
         yield buffer
     })
